@@ -12,9 +12,13 @@
 #ifdef _WIN32
 #include <Windows.h>
 #else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #endif /* _WIN32 */
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include "gethostbyname.h"
 
 /* load library */
@@ -27,13 +31,22 @@
 
 int main(int argc, char **argv)
 {
-    struct IP ip;
-    const char *name = "live.heysound.com";
-    if (GetHostByName(name, &ip) == 0)
-        printf("success: %s\n", ip.ip);
+    struct hostent *host;
+    const char *name = "baidu.com";
+    host = GetHostByName(name);
+    if (host != 0)
+    {
+        struct in_addr addr;
+        int i = 0;
+        while (host->h_addr_list[i] != 0) {
+            addr.s_addr = *(size_t*)(host->h_addr_list[i]);
+            printf("success: %s\n", inet_ntoa(addr));
+            i++;
+        }
+    }
     else
         printf("error\n");
-    ForceCloseGetHostByName();
+    CancleGetHostByName();
     getchar();
 	return 0;
 }

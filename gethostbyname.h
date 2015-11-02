@@ -2,15 +2,14 @@
 #define _GETHOSTBYNAME_H_
 
 
-#define MAX_IP_LEN 24
-struct IP
-{
-    char ip[MAX_IP_LEN];
-    unsigned short len;
-};
+#ifdef _WIN32
+#include <Winsock2.h>
+#else
+#include <netdb.h>
+#endif /* _WIN32 */
 
-int GetHostByName(const char *name, struct IP *ip);
-void ForceCloseGetHostByName();
+struct hostent *GetHostByName(const char *name);
+void CancleGetHostByName();
 
 
 #endif /*_GETHOSTBYNAME_H_*/

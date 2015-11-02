@@ -1,8 +1,8 @@
 
 CC=gcc
 LD=ld
-FLAGS=-Wall
-LDFLAGS=-Wall
+FLAGS=-g -Wall -m32
+LDFLAGS=-g -Wall -m32
 
 all: main
 

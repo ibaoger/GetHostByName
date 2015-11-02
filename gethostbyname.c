@@ -10,7 +10,6 @@
 ***************************************************************/
 
 #ifdef _WIN32
-#include <Winsock2.h>
 #else
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -81,6 +80,7 @@ struct timezone
 #endif /*_WIN32*/
 #define MAX_UDP_MSG_SIZE 512
 #define MAX_MSG_SIZE 512
+#define MAX_NAME_SIZE 256
 #define DNS_HEADER_LEN 12
 #define DNS_S_OK 0
 #define DNS_E_NULL -1
@@ -97,30 +97,35 @@ void release_dns_package(struct DNS_PACKAGE *dnsPackage);
 int create_socket_nonblock();
 struct DNS_QUESTION pack_query_question(const char *name);
 int wait_for_ready(int s, fd_set *rd, fd_set *wr, fd_set *ex);
-int unpack_response_resource_record(struct DNS_PACKAGE dnsPackage, struct IP *ip);
+int unpack_response_resource_record(struct DNS_PACKAGE dnsPackage, struct hostent *host);
 char* gettimestring();
 
 /* member value */
-const char dnsHost[] = "120.26.109.136";
-const char dnsHostBack[] = "120.26.109.136";
+struct hostent resultHost;
+char resultHostName[MAX_NAME_SIZE] = { 0 };
+char resultHostAddrList[4][4] = { {0}, {0}, {0}, {0} };
+char resultHostAddrPtrBuf[20] = {0};
+const char dnsHost[] = "114.114.114.114";
+const char dnsHostBack[] = "8.8.8.8";
 const unsigned short dnsPort = 53;
 const char defaultAQueryHeader[DNS_HEADER_LEN] = { 0x43, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 char timeStringBuffer[MAX_MSG_SIZE] = { 0 };
 const struct timeval defaultTimeout = { 6, 0 };
 static int  g_iCancelSign[2] = { -1, -1 };
 
-void ForceCloseGetHostByName()
+void CancleGetHostByName()
 {
     close(g_iCancelSign[0]);
 }
 
 /*  0: success */
 /* ~0: error */
-int GetHostByName(const char *name, struct IP *ip)
+struct hostent *GetHostByName(const char *name)
 {
-    if (name == NULL || ip == NULL || strlen(name) < 3) {
+    /* thread lock */
+    if (name == NULL || strlen(name) < 3) {
         printf("%s domain name error\n", gettimestring());
-        return DNS_E_NULL;
+        return 0;
     }
 
     if (pipe(g_iCancelSign) != 0)
@@ -128,8 +133,16 @@ int GetHostByName(const char *name, struct IP *ip)
         printf("%s create pipe failed (%d), %s\n", gettimestring(), GetLastError(), strerror(GetLastError()));
     }
 
-    struct IP resIP;
-    memset(resIP.ip, 0, MAX_IP_LEN);
+    memset(resultHostName, 0, MAX_NAME_SIZE);
+    memcpy(resultHostName, name, strlen(name));
+    memset(resultHostAddrList, 0, 4*4);
+    memset(resultHostAddrPtrBuf, 0, 20);
+    resultHost.h_name = resultHostName;
+    resultHost.h_aliases = 0;
+    resultHost.h_addrtype = AF_INET;
+    resultHost.h_length = sizeof(struct in_addr);
+    resultHost.h_addr_list = 0;
+
     struct DNS_PACKAGE dnsPackage = {NULL, 0};
     init_dns_package(&dnsPackage);
     /* header */
@@ -171,7 +184,7 @@ int GetHostByName(const char *name, struct IP *ip)
     if (sock < 0)
     {
         release_dns_package(&dnsPackage);
-        return DNS_E_NULL;
+        return 0;
     }
 
     fd_set rdset;
@@ -220,13 +233,11 @@ int GetHostByName(const char *name, struct IP *ip)
                         printf("%s recv success (%d)\n", gettimestring(), sz);
                         dnsPackage.datalen = sz;
                         /* unpack response */
-                        rc = unpack_response_resource_record(dnsPackage, &resIP);
+                        rc = unpack_response_resource_record(dnsPackage, &resultHost);
                         if (rc == 0)
                         {
-                            memcpy(ip->ip, resIP.ip, MAX_IP_LEN);
-                            ip->len = resIP.len;
                             release_dns_package(&dnsPackage);
-                            return DNS_S_OK;
+                            return &resultHost;
                         }
                     }
                     else
@@ -244,7 +255,8 @@ int GetHostByName(const char *name, struct IP *ip)
         }
     }
     release_dns_package(&dnsPackage);
-    return DNS_E_NULL;
+    /* thread unlock */
+    return 0;
 }
 
 void init_dns_package(struct DNS_PACKAGE *dnsPackage)
@@ -407,17 +419,19 @@ int wait_for_ready(int s, fd_set *rd, fd_set *wr, fd_set *ex)
 
 /*  0: success */
 /* ~0: error */
-int unpack_response_resource_record(struct DNS_PACKAGE dnsPackage, struct IP *ip)
+int unpack_response_resource_record(struct DNS_PACKAGE dnsPackage, struct hostent *host)
 {
-    if (dnsPackage.data == NULL || dnsPackage.datalen < DNS_HEADER_LEN || ip == NULL) {
+    if (dnsPackage.data == NULL || dnsPackage.datalen < DNS_HEADER_LEN || host == NULL) {
         printf("%s unpack argument error\n", gettimestring());
         return -1;
     }
     char *pos = dnsPackage.data;
-    char *ipPos = ip->ip;
     /* response id match query id */
     if (pos[0] == defaultAQueryHeader[0] && pos[1] == defaultAQueryHeader[1])
     {
+        unsigned short records = (pos[6] << 8) + pos[7];
+        /* need only four address, skip others */
+        records = (records > 4) ? 4 : records;
         pos += DNS_HEADER_LEN;
         /* read domain name */
         while (1)
@@ -432,27 +446,29 @@ int unpack_response_resource_record(struct DNS_PACKAGE dnsPackage, struct IP *ip
                 break;
             }
         }
-        /* skip type (2B) + class (2B) + name (2B) + type (2B) + class (2B) + ttl (4B) + length (2B) */
-        pos += 16;
-        char addrSliceBuf[4] = { 0 };
-        unsigned int addrSlice;
-        char dot = '.';
+        /* skip type (2B) + class (2B) */
+        pos += 4;
+
         int i = 0;
-        for (; i < 4; i++)
+        for (; i < records; i++)
         {
-            memset(addrSliceBuf, 0, 4);
-            addrSlice = (unsigned char)pos[0];
-            pos++;
-            sprintf(addrSliceBuf, "%u", addrSlice);
-            memcpy(ipPos, addrSliceBuf, strlen(addrSliceBuf));
-            ipPos += strlen(addrSliceBuf);
-            if (i < 3)
-            {
-                ipPos[0] = dot;
-                ipPos++;
-            }
+            /* skip name(2B) + type (2B) + class (2B) + ttl (4B) */
+            /* name, which name? this is not domain name? */
+            pos += 10;
+            /* ipLen = 4 */
+            unsigned short ipLen = (pos[0] << 8) + pos[1];
+            pos += 2;
+            memcpy(resultHostAddrList[i], pos, ipLen);
+            pos += 4;
         }
-        /* need only the first address, skip others */
+        char * pResultHostAddrPtrBuf= (char *)(resultHostAddrPtrBuf + 0);
+        i = 0;
+        for (; i < records; i++)
+        {
+            ((char **) pResultHostAddrPtrBuf)[i] = (char*)(resultHostAddrList[i]+0);
+        }
+        ((char **) pResultHostAddrPtrBuf)[i+1] = 0;
+        host->h_addr_list = (char **) pResultHostAddrPtrBuf;
         return 0;
     }
     return -1;
